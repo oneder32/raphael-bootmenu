@@ -1,0 +1,37 @@
+# BootMenu V0.2 配置文件
+# 位置: /data/setboot/file.txt
+#
+# 格式: 启动名称|boot.img路径|dtbo.img路径
+# 路径相对于 /data 目录（即实际路径为 /data/setboot/...）
+# 以 # 开头的行为注释，最多支持 10 个启动项
+#
+# 选择后: boot.img 刷入 boot 分区, dtbo.img 刷入 dtbo 分区, 然后正常重启
+#
+# 示例配置（请根据实际情况修改）:
+#
+# MIUI 14.0|/setboot/miui14/boot.img|/setboot/miui14/dtbo.img
+# LineageOS 21|/setboot/los21/boot.img|/setboot/los21/dtbo.img
+# Evolution X|/setboot/evox/boot.img|/setboot/evox/dtbo.img
+# Pixel Experience|/setboot/pe/boot.img|/setboot/pe/dtbo.img
+#
+# 目录结构示例:
+# /data/setboot/
+#   file.txt          <- 此配置文件
+#   font.hex          <- 可选: Unifont格式字体文件(用于中文等非ASCII显示)
+#   miui14/
+#     boot.img
+#     dtbo.img
+#   los21/
+#     boot.img
+#     dtbo.img
+#
+# 操作说明:
+#   音量+ / 音量- : 上下选择
+#   电源键 / 触控点击 : 确认选择
+#   返回键 : 跳过菜单进入Recovery
+#
+# 注意: 选择后会覆盖当前 boot 分区（含 BootMenu），
+#       如需再次使用菜单请重新刷入 BootMenu。
+
+MIUI 14 Stable|/setboot/miui14/boot.img|/setboot/miui14/dtbo.img
+LineageOS 21|/setboot/los21/boot.img|/setboot/los21/dtbo.img

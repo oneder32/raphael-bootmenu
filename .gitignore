@@ -1,0 +1,15 @@
+# Build artifacts
+/build/
+/out/
+*.img
+*.cpio
+*.cpio.gz
+kernel
+ramdisk/
+
+# Toolchain / editor noise
+*.o
+*.a
+*.swp
+*~
+.DS_Store
