@@ -1,16 +1,19 @@
 /*
- * BootMenu - Android Multi-Boot Boot Menu V0.2
+ * BootMenu - Android Multi-Boot Boot Menu V0.7
  * For Redmi K20 Pro (raphael) / Qualcomm msmnile
  *
  * Features:
- *   - Framebuffer visual menu with color UI
+ *   - DRM/framebuffer graphical menu with color UI (double-buffered page flip)
  *   - Volume +/- navigation, Power/touch to select
  *   - Touch screen support (tap to select)
  *   - Reads config from /data/setboot/file.txt
- *   - Flashes boot.img to boot partition, dtbo.img to dtbo partition
- *   - Normal reboot after selection to boot chosen system
+ *   - Selecting a ROM flashes boot.img->recovery, dtbo.img->dtbo, reboots recovery
  *   - Up to 10 boot entries, custom names
- *   - Multi-language font support (loads /data/setboot/font.hex if present)
+ *   - GRUB-style theming: theme.conf (colors) + desktop background image (PNG/JPG)
+ *   - Built-in action entries: Recovery / Fastboot / EDL(9008) / Reboot / Poweroff
+ *   - Countdown auto-boot with configurable default entry (timeout=0 disables)
+ *   - Battery level indicator
+ *   - Multi-language font (built-in CJK glyphs + optional /data/setboot/font.hex)
  *   - UTF-8 text rendering
  */
 
@@ -35,6 +38,7 @@
 #include <drm/drm_mode.h>
 #include <drm/drm_fourcc.h>
 #include <stdint.h>
+#include "stb_image.h"
 
 #ifndef DRM_MODE_CONNECTED
 #define DRM_MODE_CONNECTED 1
@@ -68,14 +72,21 @@ static void set_selinux_permissive(void) {
 }
 
 /* ============ Constants ============ */
-#define MAX_ENTRIES     10
+#define MAX_ROM         10
+#define MAX_ACTIONS     5
+#define MAX_ENTRIES     (MAX_ROM + MAX_ACTIONS)
 #define MAX_NAME_LEN    128
 #define MAX_PATH_LEN    256
 #define CONFIG_PATH     "/data/setboot/file.txt"
 #define FONT_PATH       "/data/setboot/font.hex"
+#define THEME_AUTO_PATH "/data/setboot/theme.conf"
 #define RECOVERY_DEV    "/dev/block/bootdevice/by-name/recovery"
 #define DTBO_DEV        "/dev/block/bootdevice/by-name/dtbo"
-#define BOOTMENU_VERSION "0.6"
+#define MISC_DEV        "/dev/block/bootdevice/by-name/misc"
+#define BOOTMENU_VERSION "0.7"
+
+/* Menu item types */
+enum { ITEM_ROM = 0, ITEM_RECOVERY, ITEM_FASTBOOT, ITEM_EDL, ITEM_REBOOT, ITEM_POWEROFF };
 
 /* ============ Framebuffer ============ */
 static int fb_fd = -1;
@@ -458,7 +469,7 @@ static void drm_flush(void) {
 #define COLOR_PANEL       0x0f3460
 #define COLOR_PANEL_BORDER 0xe94560
 #define COLOR_TEXT        0xeeeeee
-#define COLOR_TEXT_DIM    0x888888
+#define COLOR_TEXT_DIM    0x9aa4b2
 #define COLOR_HIGHLIGHT   0xe94560
 #define COLOR_HIGHLIGHT_TEXT 0xffffff
 #define COLOR_PROGRESS_BG 0x333333
@@ -466,13 +477,36 @@ static void drm_flush(void) {
 #define COLOR_TITLE       0xffd700
 #define COLOR_STATUS_OK   0x4CAF50
 #define COLOR_STATUS_ERR  0xf44336
+#define COLOR_ACTION      0x2b6f8e
+
+/* Runtime theme colors (overridable via theme.conf) */
+static unsigned int T_bg_top = COLOR_BG_TOP, T_bg_bot = COLOR_BG_BOT;
+static unsigned int T_panel = COLOR_PANEL, T_border = COLOR_PANEL_BORDER;
+static unsigned int T_text = COLOR_TEXT, T_dim = COLOR_TEXT_DIM;
+static unsigned int T_hi = COLOR_HIGHLIGHT, T_hi_text = COLOR_HIGHLIGHT_TEXT;
+static unsigned int T_title = COLOR_TITLE, T_accent = COLOR_HIGHLIGHT;
+
+/* Desktop background image (RGB, scaled to screen); NULL = gradient */
+static unsigned char *bg_buf = NULL;
+
+/* Config settings */
+static int    cfg_timeout = 0;          /* countdown seconds, 0 = disabled */
+static char   cfg_default_name[MAX_NAME_LEN] = "";
+static char   cfg_theme_path[MAX_PATH_LEN] = "";
+static int    rom_count = 0;            /* number of ROM entries (before actions) */
+static int    default_item_idx = -1;    /* resolved default ROM index */
+
+/* Battery */
+static int    battery_pct = -1;
+static int    battery_charging = 0;
 
 /* ============ Menu Entry ============ */
 typedef struct {
     char name[MAX_NAME_LEN];
     char boot_img[MAX_PATH_LEN];
     char dtbo_img[MAX_PATH_LEN];
-    int valid;
+    int  type;   /* ITEM_ROM / ITEM_RECOVERY / ... */
+    int  valid;
 } boot_entry_t;
 
 static boot_entry_t entries[MAX_ENTRIES];
@@ -623,12 +657,31 @@ static glyph_t *ext_glyphs = NULL;
 static int ext_glyph_count = 0;
 static int ext_glyph_capacity = 0;
 
-/* Built-in 16x16 glyphs: 半杯苏打 (so title renders without external font) */
+/* Built-in 16x16 glyphs (CJK labels render without external font):
+   半杯苏打 引导电源模式重启关机量默认秒后启动充中 */
 static const glyph_t builtin_glyphs[] = {
-    {0x534A, 16, {0x01,0x80, 0x11,0x88, 0x09,0x98, 0x0D,0x90, 0x01,0x80, 0x3F,0xFC, 0x01,0x80, 0x01,0x80, 0x01,0x80, 0x7F,0xFE, 0x01,0x80, 0x01,0x80, 0x01,0x80, 0x01,0x80, 0x01,0x80, 0x00,0x00}},
-    {0x676F, 16, {0x10,0x00, 0x13,0xFE, 0x10,0x20, 0x7C,0x20, 0x10,0x60, 0x18,0x68, 0x3C,0xE8, 0x34,0xA4, 0x35,0xA4, 0x53,0x22, 0x50,0x20, 0x10,0x20, 0x10,0x20, 0x10,0x20, 0x00,0x00, 0x00,0x00}},
-    {0x82CF, 16, {0x04,0x20, 0x04,0x20, 0x7F,0xFE, 0x04,0x20, 0x05,0x20, 0x01,0x00, 0x3F,0xF8, 0x01,0x18, 0x03,0x1C, 0x22,0x1E, 0x66,0x12, 0x4C,0x12, 0x18,0x10, 0x70,0xF0, 0x00,0x00, 0x00,0x00}},
-    {0x6253, 16, {0x10,0x00, 0x11,0xFE, 0x10,0x18, 0x7C,0x18, 0x10,0x18, 0x10,0x18, 0x10,0x18, 0x1C,0x18, 0x70,0x18, 0x50,0x18, 0x10,0x18, 0x10,0x18, 0x10,0x18, 0x70,0x70, 0x00,0x00}},
+    {0x534A, 16, {0x01,0x80,0x11,0x88,0x09,0x98,0x0D,0x90,0x01,0x80,0x3F,0xFC,0x01,0x80,0x01,0x80,0x01,0x80,0x7F,0xFE,0x01,0x80,0x01,0x80,0x01,0x80,0x01,0x80,0x01,0x80,0x00,0x00}}, /* 半 */
+    {0x676F, 16, {0x10,0x00,0x13,0xFE,0x10,0x20,0x7C,0x20,0x10,0x60,0x18,0x68,0x3C,0xE8,0x34,0xA4,0x35,0xA4,0x53,0x22,0x50,0x20,0x10,0x20,0x10,0x20,0x10,0x20,0x00,0x00,0x00,0x00}}, /* 杯 */
+    {0x82CF, 16, {0x04,0x20,0x04,0x20,0x7F,0xFE,0x04,0x20,0x05,0x20,0x01,0x00,0x3F,0xF8,0x01,0x18,0x03,0x1C,0x22,0x1E,0x66,0x12,0x4C,0x12,0x18,0x10,0x70,0xF0,0x00,0x00,0x00,0x00}}, /* 苏 */
+    {0x6253, 16, {0x10,0x00,0x11,0xFE,0x10,0x18,0x7C,0x18,0x10,0x18,0x10,0x18,0x10,0x18,0x1C,0x18,0x70,0x18,0x50,0x18,0x10,0x18,0x10,0x18,0x10,0x18,0x70,0x70,0x00,0x00}}, /* 打 */
+    {0x5F15, 16, {0x00,0x0C,0x3F,0x0C,0x01,0x0C,0x01,0x0C,0x3F,0x0C,0x20,0x0C,0x20,0x0C,0x20,0x0C,0x3F,0x8C,0x01,0x8C,0x01,0x8C,0x01,0x0C,0x01,0x0C,0x1F,0x0C,0x00,0x00,0x00,0x00}}, /* 引 */
+    {0x5BFC, 16, {0x3F,0xF8,0x30,0x08,0x3F,0xF8,0x3F,0xF8,0x30,0x04,0x3F,0xFC,0x0F,0xF8,0x00,0x10,0x7F,0xFE,0x00,0x10,0x0C,0x10,0x06,0x10,0x00,0x70,0x00,0x00,0x00,0x00}}, /* 导 */
+    {0x7535, 16, {0x01,0x00,0x01,0x00,0x3F,0xF8,0x21,0x08,0x21,0x08,0x21,0x08,0x3F,0xF8,0x21,0x08,0x21,0x08,0x3F,0xF8,0x21,0x00,0x01,0x02,0x01,0x02,0x01,0xFE,0x00,0x00}}, /* 电 */
+    {0x6E90, 16, {0x07,0xFE,0x27,0xFE,0x14,0x20,0x05,0xFC,0x45,0x04,0x65,0xFC,0x05,0xFC,0x05,0x04,0x05,0xFC,0x34,0x30,0x24,0xBC,0x2D,0xB6,0x6B,0x32,0x58,0xE0,0x00,0x00}}, /* 源 */
+    {0x6A21, 16, {0x10,0xC8,0x13,0xFE,0x10,0xC8,0x7C,0xC8,0x11,0xFC,0x19,0x04,0x3D,0xFC,0x35,0x04,0x35,0xFC,0x50,0x20,0x53,0xFE,0x10,0x50,0x10,0xCC,0x13,0x86,0x00,0x00}}, /* 模 */
+    {0x5F0F, 16, {0x00,0x48,0x00,0x4C,0x00,0x40,0x7F,0xFE,0x00,0x40,0x00,0x40,0x3F,0x60,0x3F,0x60,0x08,0x20,0x08,0x20,0x08,0x32,0x09,0x92,0x7F,0x1A,0x40,0x0C,0x00,0x00}}, /* 式 */
+    {0x91CD, 16, {0x00,0x00,0x00,0x3C,0x3F,0xF0,0x01,0x80,0x7F,0xFE,0x01,0x80,0x3F,0xFC,0x21,0x84,0x3F,0xFC,0x21,0x84,0x3F,0xFC,0x01,0x80,0x7F,0xFC,0x01,0x80,0x7F,0xFE,0x00,0x00}}, /* 重 */
+    {0x542F, 16, {0x01,0x80,0x00,0x80,0x1F,0xFC,0x10,0x04,0x10,0x04,0x1F,0xFC,0x1F,0xFC,0x10,0x00,0x17,0xFC,0x17,0xFC,0x34,0x04,0x34,0x04,0x67,0xFC,0x44,0x04,0x04,0x00,0x00,0x00}}, /* 启 */
+    {0x5173, 16, {0x08,0x10,0x0C,0x30,0x04,0x20,0x3F,0xFC,0x01,0x00,0x01,0x00,0x01,0x00,0x7F,0xFE,0x01,0x80,0x01,0xC0,0x03,0x40,0x06,0x30,0x1C,0x1C,0x70,0x0E,0x00,0x00}}, /* 关 */
+    {0x673A, 16, {0x18,0x00,0x18,0xF8,0x18,0x88,0x7E,0x88,0x18,0x88,0x18,0x88,0x3C,0x88,0x3F,0x88,0x39,0x88,0x59,0x88,0x59,0x08,0x1B,0x0A,0x1A,0x0A,0x1E,0x0E,0x00,0x00}}, /* 机 */
+    {0x91CF, 16, {0x1F,0xF8,0x10,0x08,0x1F,0xF8,0x10,0x08,0x1F,0xF8,0x7F,0xFE,0x00,0x00,0x1F,0xF8,0x1F,0xF8,0x11,0x88,0x1F,0xF8,0x3F,0xFC,0x01,0x80,0x7F,0xFE,0x00,0x00}}, /* 量 */
+    {0x9ED8, 16, {0x7F,0x10,0x7F,0x14,0x4B,0x12,0x5D,0x10,0x49,0x7E,0x7F,0x7E,0x08,0x18,0x7F,0x18,0x08,0x18,0x1F,0x38,0x70,0x2C,0x15,0x24,0x7E,0xE6,0x4A,0xC2,0x00,0x00}}, /* 默 */
+    {0x8BA4, 16, {0x30,0x20,0x10,0x20,0x18,0x20,0x00,0x20,0x00,0x60,0x70,0x60,0x10,0x60,0x10,0x60,0x10,0x50,0x10,0x50,0x14,0xD8,0x15,0x88,0x1B,0x04,0x06,0x06,0x00,0x00,0x00,0x00}}, /* 认 */
+    {0x79D2, 16, {0x04,0x20,0x78,0x20,0x50,0xAC,0x11,0xA4,0x7F,0xA6,0x11,0x22,0x1B,0x22,0x35,0x24,0x34,0x2C,0x70,0x28,0xD0,0x18,0x10,0x30,0x10,0xC0,0x17,0x80,0x00,0x00}}, /* 秒 */
+    {0x540E, 16, {0x00,0x18,0x3F,0xF8,0x30,0x00,0x30,0x00,0x3F,0xFE,0x30,0x00,0x30,0x00,0x30,0x00,0x37,0xFC,0x34,0x0C,0x24,0x0C,0x24,0x0C,0x67,0xFC,0x44,0x0C,0x00,0x00,0x00,0x00}}, /* 后 */
+    {0x52A8, 16, {0x00,0x20,0x7E,0x20,0x00,0x20,0x00,0xFE,0x00,0x22,0x7E,0x22,0x10,0x22,0x10,0x22,0x36,0x62,0x22,0x46,0x62,0x46,0x7D,0xC6,0x00,0x84,0x01,0x1C,0x00,0x00}}, /* 动 */
+    {0x5145, 16, {0x01,0x00,0x01,0x80,0x7F,0xFE,0x02,0x00,0x06,0x30,0x0C,0x18,0x19,0xF8,0x3E,0x44,0x04,0x40,0x04,0x40,0x0C,0x40,0x08,0x42,0x30,0x42,0x60,0x7E,0x00,0x00,0x00,0x00}}, /* 充 */
+    {0x4E2D, 16, {0x01,0x80,0x01,0x80,0x3F,0xFC,0x3F,0xFC,0x21,0x84,0x21,0x84,0x21,0x84,0x21,0x84,0x3F,0xFC,0x21,0x84,0x01,0x80,0x01,0x80,0x01,0x80,0x01,0x80,0x01,0x80,0x00,0x00}}, /* 中 */
 };
 #define BUILTIN_GLYPH_COUNT (int)(sizeof(builtin_glyphs)/sizeof(builtin_glyphs[0]))
 
@@ -852,15 +905,58 @@ static void draw_rect(int x, int y, int w, int h, unsigned int color) {
 }
 
 static void draw_gradient_bg(void) {
+    if (bg_buf) {
+        /* Blit pre-scaled RGB background; draw_background() adds the scrim */
+        for (int y = 0; y < fb_height; y++) {
+            const unsigned char *src = bg_buf + (size_t)y * fb_width * 3;
+            for (int x = 0; x < fb_width; x++) {
+                unsigned int color = ((unsigned int)src[x*3] << 16) |
+                                     ((unsigned int)src[x*3+1] << 8) |
+                                     (unsigned int)src[x*3+2];
+                put_pixel(x, y, color);
+            }
+        }
+        return;
+    }
     for (int y = 0; y < fb_height; y++) {
         int t = y * 255 / fb_height;
-        unsigned char r = ((COLOR_BG_TOP >> 16) & 0xFF) * (255 - t) / 255 + ((COLOR_BG_BOT >> 16) & 0xFF) * t / 255;
-        unsigned char g = ((COLOR_BG_TOP >> 8) & 0xFF) * (255 - t) / 255 + ((COLOR_BG_BOT >> 8) & 0xFF) * t / 255;
-        unsigned char b = (COLOR_BG_TOP & 0xFF) * (255 - t) / 255 + (COLOR_BG_BOT & 0xFF) * t / 255;
+        unsigned char r = ((T_bg_top >> 16) & 0xFF) * (255 - t) / 255 + ((T_bg_bot >> 16) & 0xFF) * t / 255;
+        unsigned char g = ((T_bg_top >> 8) & 0xFF) * (255 - t) / 255 + ((T_bg_bot >> 8) & 0xFF) * t / 255;
+        unsigned char b = (T_bg_top & 0xFF) * (255 - t) / 255 + (T_bg_bot & 0xFF) * t / 255;
         unsigned int color = (r << 16) | (g << 8) | b;
         for (int x = 0; x < fb_width; x++) {
             put_pixel(x, y, color);
         }
+    }
+}
+
+/* Blend a solid color over existing pixels (alpha 0..255). Used over a photo bg. */
+static void fill_rect_alpha(int x, int y, int w, int h, unsigned int color, int alpha) {
+    if (alpha >= 255) { fill_rect(x, y, w, h, color); return; }
+    if (alpha <= 0) return;
+    unsigned char cr = (color >> 16) & 0xFF, cg = (color >> 8) & 0xFF, cb = color & 0xFF;
+    for (int j = y; j < y + h; j++) {
+        for (int i = x; i < x + w; i++) {
+            if (i < 0 || i >= fb_width || j < 0 || j >= fb_height) continue;
+            unsigned char *p = fb_mem + j * fb_line_length + i * (fb_bpp / 8);
+            unsigned char r, g, b;
+            if (fb_bpp == 32 && display_is_drm) { r = p[0]; g = p[1]; b = p[2]; }
+            else { b = p[0]; g = p[1]; r = p[2]; }
+            r = (cr * alpha + r * (255 - alpha)) / 255;
+            g = (cg * alpha + g * (255 - alpha)) / 255;
+            b = (cb * alpha + b * (255 - alpha)) / 255;
+            if (fb_bpp == 32 && display_is_drm) { p[0]=r; p[1]=g; p[2]=b; p[3]=0xFF; }
+            else { p[0]=b; p[1]=g; p[2]=r; if (fb_bpp==32) p[3]=0xFF; }
+        }
+    }
+}
+
+/* Draw the desktop background: image + dark scrim, or themed gradient */
+static void draw_background(void) {
+    draw_gradient_bg();
+    if (bg_buf) {
+        /* draw_gradient_bg blitted the image; add a translucent dark scrim */
+        fill_rect_alpha(0, 0, fb_width, fb_height, 0x05060d, 140);
     }
 }
 
@@ -928,6 +1024,181 @@ static void draw_text_centered(int cx, int y, const char *str, unsigned int colo
     draw_text(cx - w / 2, y, str, color);
 }
 
+/* ============ Theme & background (GRUB-style) ============ */
+static char *bm_trim(char *s) {
+    while (*s == ' ' || *s == '\t' || *s == '"') s++;
+    char *e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' ||
+                     e[-1] == '\n' || e[-1] == '"')) *--e = '\0';
+    return s;
+}
+
+static void bm_lower(char *s) { for (; *s; s++) if (*s >= 'A' && *s <= 'Z') *s += 32; }
+
+static void normalize_data_path(char *p) {
+    if (p[0] == '/' && strncmp(p, "/data/", 6) != 0) {
+        char tmp[MAX_PATH_LEN];
+        snprintf(tmp, sizeof(tmp), "/data%s", p);
+        strncpy(p, tmp, MAX_PATH_LEN - 1);
+        p[MAX_PATH_LEN - 1] = '\0';
+    }
+}
+
+static unsigned int parse_hex_color(const char *s) {
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '#') s++;
+    return (unsigned int)(strtoul(s, NULL, 16) & 0xFFFFFF);
+}
+
+/* Load PNG/JPG/BMP and cover-scale (center crop) to screen size, RGB */
+static unsigned char *load_image_scaled(const char *path, int dw, int dh) {
+    int iw = 0, ih = 0, comp = 0;
+    unsigned char *img = stbi_load(path, &iw, &ih, &comp, 3);
+    if (!img) {
+        bm_log("[BootMenu] Theme image load failed: %s\n", path);
+        return NULL;
+    }
+    unsigned char *out = malloc((size_t)dw * dh * 3);
+    if (!out) { stbi_image_free(img); return NULL; }
+    double sa = (double)dw / iw, sb = (double)dh / ih;
+    double scale = sa > sb ? sa : sb;   /* cover */
+    int sw = (int)(dw / scale), sh = (int)(dh / scale);
+    if (sw > iw) sw = iw;
+    if (sh > ih) sh = ih;
+    int sx0 = (iw - sw) / 2, sy0 = (ih - sh) / 2;
+    for (int y = 0; y < dh; y++) {
+        int sy = sy0 + (int)((long long)y * sh / dh);
+        if (sy >= ih) sy = ih - 1;
+        for (int x = 0; x < dw; x++) {
+            int sx = sx0 + (int)((long long)x * sw / dw);
+            if (sx >= iw) sx = iw - 1;
+            const unsigned char *sp = &img[(sy * iw + sx) * 3];
+            unsigned char *dp = &out[(y * dw + x) * 3];
+            dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2];
+        }
+    }
+    stbi_image_free(img);
+    bm_log("[BootMenu] Theme background loaded: %s (%dx%d)\n", path, iw, ih);
+    return out;
+}
+
+/* Parse a GRUB-inspired theme file: key:value / key=value, # comments */
+static void load_theme(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) { bm_log("[BootMenu] No theme file: %s\n", path); return; }
+    char line[640];
+    while (fgets(line, sizeof(line), f)) {
+        int len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
+        char *p = line;
+        while (*p == ' ' || *p == '\t' || *p == '{' || *p == '}') p++;
+        if (*p == '\0' || *p == '#' || *p == ';') continue;
+        char *sep = strchr(p, '=');
+        if (!sep) sep = strchr(p, ':');
+        if (!sep) continue;
+        *sep = '\0';
+        char *key = bm_trim(p);
+        char *val = bm_trim(sep + 1);
+        char kl[64];
+        strncpy(kl, key, sizeof(kl) - 1); kl[sizeof(kl) - 1] = '\0';
+        bm_lower(kl);
+        val = bm_trim(val);
+        if (!strcmp(kl, "desktop-image") || !strcmp(kl, "background") ||
+            !strcmp(kl, "background-image") || !strcmp(kl, "bg-image") ||
+            !strcmp(kl, "image")) {
+            char imgp[MAX_PATH_LEN];
+            strncpy(imgp, val, sizeof(imgp) - 1); imgp[sizeof(imgp) - 1] = '\0';
+            normalize_data_path(imgp);
+            unsigned char *nb = load_image_scaled(imgp, fb_width, fb_height);
+            if (nb) { if (bg_buf) free(bg_buf); bg_buf = nb; }
+        } else if (val[0] == '#') {
+            /* GRUB color values may look like "#fg/#bg"; take the first token */
+            char *slash = strchr(val, '/');
+            if (slash) *slash = '\0';
+            unsigned int c = parse_hex_color(val);
+            if (!strcmp(kl, "bg-top") || !strcmp(kl, "background-top")) T_bg_top = c;
+            else if (!strcmp(kl, "bg-bottom") || !strcmp(kl, "bg-bot") || !strcmp(kl, "background-bottom")) T_bg_bot = c;
+            else if (!strcmp(kl, "title-color")) T_title = c;
+            else if (!strcmp(kl, "text-color") || !strcmp(kl, "fg-color")) T_text = c;
+            else if (!strcmp(kl, "dim-color") || !strcmp(kl, "secondary-color")) T_dim = c;
+            else if (!strcmp(kl, "panel-color") || !strcmp(kl, "menu-color") ||
+                     !strcmp(kl, "box-color") || !strcmp(kl, "menu-bg")) T_panel = c;
+            else if (!strcmp(kl, "border-color")) T_border = c;
+            else if (!strcmp(kl, "highlight-color") || !strcmp(kl, "selected-color") ||
+                     !strcmp(kl, "selected-bg") || !strcmp(kl, "highlight-bg")) T_hi = c;
+            else if (!strcmp(kl, "selected-text-color") || !strcmp(kl, "highlight-text") ||
+                     !strcmp(kl, "selected-fg")) T_hi_text = c;
+            else if (!strcmp(kl, "accent-color")) T_accent = c;
+        }
+    }
+    fclose(f);
+    bm_log("[BootMenu] Theme loaded: %s\n", path);
+}
+
+/* ============ Battery ============ */
+static int read_int_file(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    int v = -1;
+    if (fscanf(f, "%d", &v) != 1) v = -1;
+    fclose(f);
+    return v;
+}
+
+static void read_battery(void) {
+    battery_pct = read_int_file("/sys/class/power_supply/battery/capacity");
+    FILE *s = fopen("/sys/class/power_supply/battery/status", "r");
+    battery_charging = 0;
+    if (s) {
+        char st[40] = "";
+        if (fgets(st, sizeof(st), s)) {
+            if (strstr(st, "Charg") || strstr(st, "Full")) battery_charging = 1;
+        }
+        fclose(s);
+    }
+    if (battery_pct < 0 || battery_pct > 100) {
+        DIR *d = opendir("/sys/class/power_supply");
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d))) {
+                char cp[320], sp[320];
+                snprintf(cp, sizeof(cp), "/sys/class/power_supply/%s/capacity", e->d_name);
+                int v = read_int_file(cp);
+                if (v >= 0 && v <= 100) {
+                    battery_pct = v;
+                    snprintf(sp, sizeof(sp), "/sys/class/power_supply/%s/status", e->d_name);
+                    FILE *sf = fopen(sp, "r");
+                    if (sf) { char stt[40] = ""; if (fgets(stt, sizeof(stt), sf) &&
+                              (strstr(stt, "Charg") || strstr(stt, "Full"))) battery_charging = 1; fclose(sf); }
+                    break;
+                }
+            }
+            closedir(d);
+        }
+    }
+    bm_log("[BootMenu] Battery: %d%% charging=%d\n", battery_pct, battery_charging);
+}
+
+/* Draw battery gauge + label, right-aligned ending at x_right */
+static void draw_battery(int x_right, int y) {
+    if (battery_pct < 0) return;
+    char txt[48];
+    if (battery_charging)
+        snprintf(txt, sizeof(txt), "\xE5\x85\x85\xE7\x94\xB5\xE4\xB8\xAD %d%%", battery_pct); /* 充电中 */
+    else
+        snprintf(txt, sizeof(txt), "\xE7\x94\xB5\xE9\x87\x8F %d%%", battery_pct);           /* 电量 */
+    int tw = text_width(txt);
+    int icon_w = 40, icon_h = 20, gap = 8;
+    int x0 = x_right - (tw + gap + icon_w);
+    unsigned int col = (battery_charging || battery_pct > 20) ? COLOR_STATUS_OK : COLOR_STATUS_ERR;
+    draw_text(x0, y + 2, txt, col);
+    int bx = x0 + tw + gap, by = y;
+    draw_rect(bx, by, icon_w - 5, icon_h, T_text);
+    fill_rect(bx + icon_w - 5, by + icon_h / 2 - 3, 4, 6, T_text);
+    int fw = (icon_w - 5 - 8) * battery_pct / 100;
+    if (fw > 0) fill_rect(bx + 3, by + 3, fw, icon_h - 6, col);
+}
+
 /* ============ Config parsing ============ */
 static int parse_config(const char *path) {
     FILE *f = fopen(path, "r");
@@ -937,48 +1208,106 @@ static int parse_config(const char *path) {
     }
     char line[512];
     entry_count = 0;
-    while (fgets(line, sizeof(line), f) && entry_count < MAX_ENTRIES) {
+    rom_count = 0;
+    while (fgets(line, sizeof(line), f) && rom_count < MAX_ROM) {
         /* Remove trailing newline */
         int len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
+        char *first = line;
+        while (*first == ' ' || *first == '\t') first++;
         /* Skip empty lines and comments */
-        if (len == 0 || line[0] == '#' || line[0] == ';') continue;
-        /* Parse: name|boot_img|dtbo_img */
-        char *name = line;
-        char *pipe1 = strchr(line, '|');
-        if (!pipe1) continue;
-        *pipe1 = '\0';
-        char *boot_img = pipe1 + 1;
-        char *pipe2 = strchr(boot_img, '|');
-        char *dtbo_img = "";
-        if (pipe2) {
-            *pipe2 = '\0';
-            dtbo_img = pipe2 + 1;
-        }
-        /* Trim whitespace */
-        while (*name == ' ' || *name == '\t') name++;
-        char *end = name + strlen(name) - 1;
-        while (end > name && (*end == ' ' || *end == '\t')) *end-- = '\0';
-        strncpy(entries[entry_count].name, name, MAX_NAME_LEN - 1);
-        strncpy(entries[entry_count].boot_img, boot_img, MAX_PATH_LEN - 1);
-        strncpy(entries[entry_count].dtbo_img, dtbo_img, MAX_PATH_LEN - 1);
-        /* Normalize paths: /setboot/... -> /data/setboot/... */
-        for (int pi = 0; pi < 2; pi++) {
-            char *p = (pi == 0) ? entries[entry_count].boot_img : entries[entry_count].dtbo_img;
-            if (p[0] == '/' && strncmp(p, "/data/", 6) != 0) {
-                char tmp[MAX_PATH_LEN];
-                snprintf(tmp, sizeof(tmp), "/data%s", p);
-                strncpy(p, tmp, MAX_PATH_LEN - 1);
+        if (*first == '\0' || *first == '#' || *first == ';') continue;
+
+        if (strchr(line, '|')) {
+            /* ROM entry: name|boot_img|dtbo_img */
+            char *name = line;
+            char *pipe1 = strchr(line, '|');
+            *pipe1 = '\0';
+            char *boot_img = pipe1 + 1;
+            char *pipe2 = strchr(boot_img, '|');
+            char *dtbo_img = "";
+            if (pipe2) { *pipe2 = '\0'; dtbo_img = pipe2 + 1; }
+            name = bm_trim(name); boot_img = bm_trim(boot_img); dtbo_img = bm_trim(dtbo_img);
+            boot_entry_t *e = &entries[entry_count];
+            memset(e, 0, sizeof(*e));
+            strncpy(e->name, name, MAX_NAME_LEN - 1);
+            strncpy(e->boot_img, boot_img, MAX_PATH_LEN - 1);
+            strncpy(e->dtbo_img, dtbo_img, MAX_PATH_LEN - 1);
+            /* Normalize paths: /setboot/... -> /data/setboot/... */
+            normalize_data_path(e->boot_img);
+            normalize_data_path(e->dtbo_img);
+            e->type = ITEM_ROM;
+            e->valid = 1;
+            printf("[BootMenu] Entry %d: '%s' boot=%s dtbo=%s\n",
+                   rom_count, e->name, e->boot_img, e->dtbo_img);
+            entry_count++;
+            rom_count++;
+        } else {
+            /* Setting: key=value or key:value */
+            char *eq = strchr(line, '=');
+            if (!eq) eq = strchr(line, ':');
+            if (!eq) continue;
+            *eq = '\0';
+            char *key = bm_trim(line);
+            char *val = bm_trim(eq + 1);
+            char kl[48];
+            strncpy(kl, key, sizeof(kl) - 1); kl[sizeof(kl) - 1] = '\0';
+            bm_lower(kl);
+            if (!strcmp(kl, "timeout") || !strcmp(kl, "countdown") || !strcmp(kl, "timeout_sec")) {
+                int t = atoi(val);
+                if (t < 0) t = 0; if (t > 600) t = 600;
+                cfg_timeout = t;
+                printf("[BootMenu] Config timeout=%d (0=disabled)\n", cfg_timeout);
+            } else if (!strcmp(kl, "default") || !strcmp(kl, "default_entry")) {
+                strncpy(cfg_default_name, val, MAX_NAME_LEN - 1);
+                printf("[BootMenu] Config default='%s'\n", cfg_default_name);
+            } else if (!strcmp(kl, "theme") || !strcmp(kl, "theme-file") || !strcmp(kl, "themefile")) {
+                strncpy(cfg_theme_path, val, MAX_PATH_LEN - 1);
+                normalize_data_path(cfg_theme_path);
+                printf("[BootMenu] Config theme='%s'\n", cfg_theme_path);
             }
         }
-        entries[entry_count].valid = 1;
-        printf("[BootMenu] Entry %d: '%s' boot=%s dtbo=%s\n",
-               entry_count, entries[entry_count].name,
-               entries[entry_count].boot_img, entries[entry_count].dtbo_img);
-        entry_count++;
     }
     fclose(f);
-    return entry_count;
+    return rom_count;
+}
+
+static void add_action_item(int type, const char *name) {
+    if (entry_count >= MAX_ENTRIES) return;
+    boot_entry_t *e = &entries[entry_count];
+    memset(e, 0, sizeof(*e));
+    strncpy(e->name, name, MAX_NAME_LEN - 1);
+    e->type = type;
+    e->valid = 1;
+    entry_count++;
+}
+
+/* Append built-in action entries after the ROM list */
+static void append_action_items(void) {
+    add_action_item(ITEM_RECOVERY, "Recovery");
+    add_action_item(ITEM_FASTBOOT, "Fastboot / Bootloader");
+    add_action_item(ITEM_EDL, "EDL \xE6\xA8\xA1\xE5\xBC\x8F (9008)");          /* EDL 模式 */
+    add_action_item(ITEM_REBOOT, "Reboot \xE9\x87\x8D\xE5\x90\xAF");            /* Reboot 重启 */
+    add_action_item(ITEM_POWEROFF, "Poweroff \xE5\x85\xB3\xE6\x9C\xBA");        /* Poweroff 关机 */
+}
+
+/* Resolve default ROM index from cfg_default_name (1-based number or name) */
+static void resolve_default(void) {
+    default_item_idx = -1;
+    if (rom_count <= 0) return;
+    if (cfg_default_name[0]) {
+        int all_digits = 1;
+        for (char *c = cfg_default_name; *c; c++)
+            if (!(*c >= '0' && *c <= '9') && *c != ' ') { all_digits = 0; break; }
+        if (all_digits) {
+            int n = atoi(cfg_default_name) - 1;
+            if (n >= 0 && n < rom_count) { default_item_idx = n; return; }
+        }
+        for (int i = 0; i < rom_count; i++) {
+            if (!strcmp(entries[i].name, cfg_default_name)) { default_item_idx = i; return; }
+        }
+    }
+    default_item_idx = 0;
 }
 
 /* ============ Input handling ============ */
@@ -1134,117 +1463,295 @@ static int flash_file_to_device(const char *src_path, const char *dev_path, cons
     return 0;
 }
 
-/* ============ Normal reboot ============ */
+/* ============ Reboot / power actions ============ */
 #include <sys/syscall.h>
 #include <linux/reboot.h>
 
-static void do_reboot(void) {
-    bm_log("[BootMenu] Rebooting to recovery...\n");
-    usleep(500000);
-    /* Method 1: Linux reboot syscall RESTART2 with "recovery" */
-    syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
-            LINUX_REBOOT_CMD_RESTART2, "recovery");
-    /* Method 2: Write boot-recovery to misc partition then normal reboot */
-    int misc_fd = open("/dev/block/bootdevice/by-name/misc", O_WRONLY | O_SYNC);
-    if (misc_fd >= 0) {
-        unsigned char msg[2048];
-        memset(msg, 0, sizeof(msg));
-        memcpy(msg, "boot-recovery", 13);
-        write(misc_fd, msg, sizeof(msg));
-        fsync(misc_fd);
-        close(misc_fd);
-        reboot(RB_AUTOBOOT);
-    }
-    /* Method 3: standard reboot */
-    reboot(RB_AUTOBOOT);
-    /* Method 4: sysrq-trigger as last resort */
+static void bm_sync(void) { sync(); }
+
+static void sysrq_trigger(char c) {
     int fd = open("/proc/sysrq-trigger", O_WRONLY);
-    if (fd >= 0) {
-        write(fd, "b", 1);
-        close(fd);
-    }
-    while (1) { sleep(1); }
+    if (fd >= 0) { write(fd, &c, 1); close(fd); }
 }
+
+static void write_bcb(const char *cmd) {
+    int fd = open(MISC_DEV, O_WRONLY | O_SYNC);
+    if (fd < 0) return;
+    unsigned char msg[2048];
+    memset(msg, 0, sizeof(msg));
+    if (cmd) strncpy((char *)msg, cmd, sizeof(msg) - 1);
+    write(fd, msg, sizeof(msg));
+    fsync(fd);
+    close(fd);
+}
+
+static void clear_bcb(void) { write_bcb(NULL); }
+
+static void restart2(const char *arg) {
+    bm_sync();
+    syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
+            LINUX_REBOOT_CMD_RESTART2, (char *)arg);
+}
+
+static void reboot_cmd(int cmd) {
+    bm_sync();
+    syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, cmd, NULL);
+}
+
+static void hang_forever(void) {
+    while (1) sleep(1);
+}
+
+/* Boot the currently-installed recovery (OrangeFox), no flashing */
+static void reboot_recovery(void) {
+    bm_log("[BootMenu] Rebooting to recovery...\n");
+    restart2("recovery");
+    usleep(300000);
+    write_bcb("boot-recovery");
+    reboot_cmd(LINUX_REBOOT_CMD_RESTART);
+    usleep(300000);
+    sysrq_trigger('b');
+    hang_forever();
+}
+
+static void reboot_fastboot(void) {
+    bm_log("[BootMenu] Rebooting to fastboot/bootloader...\n");
+    restart2("bootloader");
+    usleep(300000);
+    write_bcb("bootonce-bootloader");
+    restart2("bootloader");
+    usleep(300000);
+    reboot_cmd(LINUX_REBOOT_CMD_RESTART);
+    sysrq_trigger('b');
+    hang_forever();
+}
+
+/* Qualcomm Emergency Download mode (EDL / 9008) */
+static void reboot_edl(void) {
+    bm_log("[BootMenu] Rebooting to EDL (9008 emergency download)...\n");
+    restart2("edl");
+    usleep(400000);
+    restart2("emergency");
+    usleep(400000);
+    restart2("9008");
+    usleep(400000);
+    /* Some Qualcomm kernels expose an EDL restart node */
+    int fd = open("/sys/class/android_usb/android0/boot_mode", O_WRONLY);
+    if (fd >= 0) { write(fd, "edl", 3); close(fd); }
+    bm_log("[BootMenu] EDL reboot not honored by kernel; falling back to fastboot\n");
+    reboot_fastboot();
+    hang_forever();
+}
+
+static void reboot_system(void) {
+    bm_log("[BootMenu] Normal reboot (back to BootMenu on boot partition)...\n");
+    clear_bcb();
+    reboot_cmd(LINUX_REBOOT_CMD_RESTART);
+    usleep(300000);
+    restart2("");
+    sysrq_trigger('b');
+    hang_forever();
+}
+
+static void power_off(void) {
+    bm_log("[BootMenu] Powering off...\n");
+    reboot_cmd(LINUX_REBOOT_CMD_POWER_OFF);
+    usleep(300000);
+    restart2("poweroff");
+    usleep(300000);
+    sysrq_trigger('o');
+    hang_forever();
+}
+
+/* Execute the selected menu entry (ROM flash or built-in action) */
+static void activate_entry(int idx) {
+    boot_entry_t *ent = &entries[idx];
+    bm_log("[BootMenu] Activate idx=%d type=%d name='%s'\n", idx, ent->type, ent->name);
+    switch (ent->type) {
+        case ITEM_RECOVERY:
+            fb_close(); close_input_devices();
+            reboot_recovery();
+            break;
+        case ITEM_FASTBOOT:
+            fb_close(); close_input_devices();
+            reboot_fastboot();
+            break;
+        case ITEM_EDL:
+            fb_close(); close_input_devices();
+            reboot_edl();
+            break;
+        case ITEM_REBOOT:
+            fb_close(); close_input_devices();
+            reboot_system();
+            break;
+        case ITEM_POWEROFF:
+            fb_close(); close_input_devices();
+            power_off();
+            break;
+        case ITEM_ROM:
+        default:
+            break; /* handled by caller (flash flow) */
+    }
+}
+
+/* Back-compat name used by the flash flow */
+static void do_reboot(void) { reboot_recovery(); }
 
 /* ============ Menu rendering ============ */
 /* Menu item geometry */
+#define MAX_ROWS (MAX_ENTRIES + 2)
+typedef struct { int header; int item; int y; int h; } row_t;
+static row_t menu_rows[MAX_ROWS];
+static int menu_row_count = 0;
 static int menu_item_height = 64;
 static int menu_item_width = 0;
 static int menu_x = 0;
 static int menu_y = 0;
-static int menu_visible_count = 0;
-static int menu_scroll = 0;
+static int menu_gap = 12;
+static int menu_header_h = 44;
 
 static void calc_menu_layout(void) {
     menu_item_width = fb_width * 3 / 4;
-    if (menu_item_width > 800) menu_item_width = 800;
+    if (menu_item_width > 820) menu_item_width = 820;
     menu_x = (fb_width - menu_item_width) / 2;
-    menu_y = fb_height * 0.22;
-    menu_item_height = 64;
-    int available_h = fb_height - menu_y - 120;
-    menu_visible_count = available_h / (menu_item_height + 12);
-    if (menu_visible_count > entry_count) menu_visible_count = entry_count;
-    if (menu_visible_count < 1) menu_visible_count = 1;
+    int top_reserve = 190, bottom_reserve = 140;
+    int avail = fb_height - top_reserve - bottom_reserve;
+    int n = entry_count > 0 ? entry_count : 1;
+    /* Fit all item rows + one section header */
+    int h = (avail - menu_header_h - n * menu_gap) / n;
+    if (h > 112) h = 112;
+    if (h < 52) h = 52;
+    menu_item_height = h;
+    /* Vertically center the whole row block */
+    int total_h = menu_header_h + n * (h + menu_gap);
+    int start_y = top_reserve + (avail - total_h) / 2;
+    if (start_y < top_reserve) start_y = top_reserve;
+    menu_y = start_y;
+    /* Build row descriptors (insert a header before the action section) */
+    menu_row_count = 0;
+    int y = start_y;
+    for (int i = 0; i < entry_count; i++) {
+        if (i == rom_count) {
+            menu_rows[menu_row_count].header = 1;
+            menu_rows[menu_row_count].item = -1;
+            menu_rows[menu_row_count].y = y;
+            menu_rows[menu_row_count].h = menu_header_h;
+            menu_row_count++;
+            y += menu_header_h;
+        }
+        menu_rows[menu_row_count].header = 0;
+        menu_rows[menu_row_count].item = i;
+        menu_rows[menu_row_count].y = y;
+        menu_rows[menu_row_count].h = menu_item_height;
+        menu_row_count++;
+        y += menu_item_height + menu_gap;
+    }
 }
 
-static void render_menu(void) {
-    draw_gradient_bg();
+/* Map a touch point to an item index, or -1 */
+static int item_at_xy(int tx, int ty) {
+    for (int r = 0; r < menu_row_count; r++) {
+        if (menu_rows[r].header) continue;
+        int y = menu_rows[r].y, h = menu_rows[r].h;
+        if (ty >= y && ty <= y + h && tx >= menu_x && tx <= menu_x + menu_item_width)
+            return menu_rows[r].item;
+    }
+    return -1;
+}
+
+static void menu_panel(int x, int y, int w, int h, unsigned int solid, int alpha) {
+    if (bg_buf) fill_rect_alpha(x, y, w, h, solid, alpha);
+    else        fill_rect(x, y, w, h, solid);
+}
+
+static void render_menu(int cd_remaining) {
+    draw_background();
     /* Title */
     char title[64];
     snprintf(title, sizeof(title), "BootMenu v%s  by\xE5\x8D\x8A\xE6\x9D\xAF\xE8\x8B\x8F\xE6\x89\x93", BOOTMENU_VERSION);
-    draw_text_centered(fb_width / 2, menu_y - 80, title, COLOR_TITLE);
-    draw_text_centered(fb_width / 2, menu_y - 56, "Multi-Boot Selector", COLOR_TEXT_DIM);
-    /* Subtitle with entry count */
-    char sub[64];
-    snprintf(sub, sizeof(sub), "%d boot option(s) available", entry_count);
-    draw_text_centered(fb_width / 2, menu_y - 32, sub, COLOR_TEXT_DIM);
-    /* Calculate scroll */
-    if (selected < menu_scroll) menu_scroll = selected;
-    if (selected >= menu_scroll + menu_visible_count) menu_scroll = selected - menu_visible_count + 1;
-    /* Draw menu items */
-    for (int i = 0; i < menu_visible_count && (menu_scroll + i) < entry_count; i++) {
-        int idx = menu_scroll + i;
-        int y = menu_y + i * (menu_item_height + 12);
-        int is_sel = (idx == selected);
-        unsigned int bg_color = is_sel ? COLOR_HIGHLIGHT : COLOR_PANEL;
-        unsigned int text_color = is_sel ? COLOR_HIGHLIGHT_TEXT : COLOR_TEXT;
-        /* Panel */
-        fill_rect(menu_x, y, menu_item_width, menu_item_height, bg_color);
-        draw_rect(menu_x, y, menu_item_width, menu_item_height,
-                  is_sel ? COLOR_HIGHLIGHT_TEXT : COLOR_PANEL_BORDER);
-        /* Selection indicator */
-        if (is_sel) {
-            fill_rect(menu_x, y, 6, menu_item_height, COLOR_TITLE);
+    draw_text_centered(fb_width / 2, 56, title, T_title);
+    draw_text_centered(fb_width / 2, 92, "Multi-Boot Selector", T_dim);
+    /* Battery (top-right); read once via read_battery() in main */
+    draw_battery(fb_width - 36, 58);
+
+    /* Countdown / default line */
+    int list_top = menu_y;
+    if (cd_remaining >= 0 && default_item_idx >= 0 && default_item_idx < rom_count) {
+        char cd[160];
+        snprintf(cd, sizeof(cd), "\xE9\xBB\x98\xE8\xAE\xA4 %d s  %s",   /* 默认 N s */
+                 cd_remaining, entries[default_item_idx].name);
+        draw_text_centered(fb_width / 2, 128, cd, T_accent);
+        int bar_w = menu_item_width, bar_h = 10;
+        int bx = menu_x, by = 150;
+        menu_panel(bx, by, bar_w, bar_h, COLOR_PROGRESS_BG, 180);
+        double frac = (cfg_timeout > 0) ? (double)cd_remaining / cfg_timeout : 0;
+        if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+        fill_rect(bx, by, (int)(bar_w * frac), bar_h, T_accent);
+        list_top = menu_y + 10;
+    } else {
+        char sub[64];
+        snprintf(sub, sizeof(sub), "%d system(s) + power actions", rom_count);
+        draw_text_centered(fb_width / 2, 128, sub, T_dim);
+    }
+    (void)list_top;
+
+    /* Rows */
+    for (int r = 0; r < menu_row_count; r++) {
+        if (menu_rows[r].header) {
+            int hy = menu_rows[r].y + menu_rows[r].h / 2 - 8;
+            const char *htxt = "\xE5\xBC\x95\xE5\xAF\xBC / \xE7\x94\xB5\xE6\xBA\x90"; /* 引导 / 电源 */
+            int tw = text_width(htxt);
+            int cx = fb_width / 2;
+            draw_hline(menu_x, hy + 8, (menu_item_width - tw) / 2 - 24, T_dim);
+            draw_hline(cx + tw / 2 + 24, hy + 8, (menu_item_width - tw) / 2 - 24, T_dim);
+            draw_text_centered(cx, hy, htxt, T_accent);
+            continue;
         }
-        /* Entry number */
-        char num[8];
-        snprintf(num, sizeof(num), "%d.", idx + 1);
-        draw_text(menu_x + 20, y + (menu_item_height - 16) / 2, num,
-                  is_sel ? COLOR_TITLE : COLOR_TEXT_DIM);
-        /* Entry name */
-        draw_text(menu_x + 60, y + (menu_item_height - 16) / 2,
-                  entries[idx].name, text_color);
+        int idx = menu_rows[r].item;
+        int y = menu_rows[r].y;
+        int is_sel = (idx == selected);
+        int is_action = entries[idx].type != ITEM_ROM;
+        unsigned int bg_col = is_sel ? T_hi : (is_action ? COLOR_ACTION : T_panel);
+        unsigned int txt_col = is_sel ? T_hi_text : T_text;
+        unsigned int border_col = is_sel ? T_hi_text : (is_action ? T_accent : T_border);
+        menu_panel(menu_x, y, menu_item_width, menu_item_height, bg_col, is_sel ? 220 : 170);
+        draw_rect(menu_x, y, menu_item_width, menu_item_height, border_col);
+        if (is_sel) fill_rect(menu_x, y, 6, menu_item_height, T_title);
+
+        int ty = y + (menu_item_height - 16) / 2;
+        if (!is_action) {
+            char num[8];
+            snprintf(num, sizeof(num), "%d.", idx + 1);
+            draw_text(menu_x + 20, ty, num, is_sel ? T_hi_text : T_dim);
+        } else {
+            draw_text(menu_x + 20, ty, ">", is_sel ? T_title : T_accent);
+        }
+        draw_text(menu_x + 60, ty, entries[idx].name, txt_col);
+
+        /* Default badge for ROM entries */
+        if (!is_action && idx == default_item_idx) {
+            const char *db = "\xE9\xBB\x98\xE8\xAE\xA4"; /* 默认 */
+            int dw = text_width(db);
+            draw_text(menu_x + menu_item_width - dw - 22, ty, db,
+                      is_sel ? T_hi_text : T_title);
+        }
     }
-    /* Scroll indicators */
-    if (menu_scroll > 0) {
-        draw_text_centered(fb_width / 2, menu_y - 8, "^ ^ ^", COLOR_TEXT_DIM);
-    }
-    if (menu_scroll + menu_visible_count < entry_count) {
-        int bottom_y = menu_y + menu_visible_count * (menu_item_height + 12) + 4;
-        draw_text_centered(fb_width / 2, bottom_y, "v v v", COLOR_TEXT_DIM);
-    }
+
     /* Footer instructions */
-    int footer_y = fb_height - 60;
+    int footer_y = fb_height - 92;
     draw_text_centered(fb_width / 2, footer_y,
-                       "Vol+/- : Navigate   Power/Touch : Select   Back : Recovery", COLOR_TEXT_DIM);
-    draw_text_centered(fb_width / 2, footer_y + 22,
-                       "Config: /data/setboot/file.txt", COLOR_TEXT_DIM);
+                       "Vol+/- Navigate      Power / Touch Select", T_dim);
+    draw_text_centered(fb_width / 2, footer_y + 24,
+                       "Recovery / Fastboot / EDL / Reboot / Poweroff in the list", T_dim);
+    draw_text_centered(fb_width / 2, footer_y + 46,
+                       "Config: /data/setboot/file.txt", T_dim);
     drm_flush();
 }
 
 static void render_flash_screen(const char *name, const char *status, int progress) {
-    draw_gradient_bg();
-    draw_text_centered(fb_width / 2, fb_height / 2 - 80, "Flashing Boot Image", COLOR_TITLE);    draw_text_centered(fb_width / 2, fb_height / 2 - 50, name, COLOR_TEXT);
+    draw_background();
+    draw_text_centered(fb_width / 2, fb_height / 2 - 80, "Flashing Boot Image", T_title);
+    draw_text_centered(fb_width / 2, fb_height / 2 - 50, name, T_text);
     /* Progress bar */
     int bar_w = fb_width * 2 / 3;
     int bar_h = 32;
@@ -1254,26 +1761,27 @@ static void render_flash_screen(const char *name, const char *status, int progre
     if (progress > 0) {
         fill_rect(bar_x, bar_y, bar_w * progress / 100, bar_h, COLOR_PROGRESS_FG);
     }
-    draw_rect(bar_x, bar_y, bar_w, bar_h, COLOR_TEXT_DIM);
+    draw_rect(bar_x, bar_y, bar_w, bar_h, T_dim);
     char pct[16];
     snprintf(pct, sizeof(pct), "%d%%", progress);
-    draw_text_centered(fb_width / 2, bar_y + 8, pct, COLOR_HIGHLIGHT_TEXT);
+    draw_text_centered(fb_width / 2, bar_y + 8, pct, T_hi_text);
     if (status) {
-        draw_text_centered(fb_width / 2, bar_y + bar_h + 20, status, COLOR_TEXT);
+        draw_text_centered(fb_width / 2, bar_y + bar_h + 20, status, T_text);
     }
     drm_flush();
 }
 
 static void render_error_screen(const char *msg) {
-    draw_gradient_bg();
+    draw_background();
     draw_text_centered(fb_width / 2, fb_height / 2 - 40, "ERROR", COLOR_STATUS_ERR);
-    draw_text_centered(fb_width / 2, fb_height / 2, msg, COLOR_TEXT);
+    draw_text_centered(fb_width / 2, fb_height / 2, msg, T_text);
     draw_text_centered(fb_width / 2, fb_height / 2 + 40,
-                       "Press Power to continue", COLOR_TEXT_DIM);
+                       "Press Power to continue", T_dim);
     drm_flush();
 }
 
 /* ============ Main ============ */
+#ifndef HOST_TEST
 int main(int argc, char **argv) {
     set_selinux_permissive();
     bm_log("[BootMenu] Starting BootMenu v%s\n", BOOTMENU_VERSION);
@@ -1291,68 +1799,95 @@ int main(int argc, char **argv) {
     /* Open input devices */
     open_input_devices();
     bm_log("[BootMenu] %d input devices opened\n", input_count);
-    /* Parse config */
-    if (parse_config(CONFIG_PATH) <= 0) {
-        /* No config or empty - show error and continue to recovery */
-        render_error_screen("No config file found at /data/setboot/file.txt");
-        /* Wait for power key or timeout */
-        int waited = 0;
-        while (waited < 10000) {
-            int tx, ty;
-            int inp = wait_input(500, &tx, &ty);
-            if (inp == INPUT_SELECT || inp == INPUT_TOUCH) break;
-            waited += 500;
-        }
-        fb_close();
-        close_input_devices();
-        return 0;
+
+    /* Parse ROM config (optional), then always append power/boot actions */
+    parse_config(CONFIG_PATH);
+    append_action_items();
+    resolve_default();
+    bm_log("[BootMenu] %d ROM(s), %d total items, default idx=%d timeout=%d\n",
+           rom_count, entry_count, default_item_idx, cfg_timeout);
+
+    /* Load GRUB-style theme: explicit path from config, else auto-detect */
+    if (cfg_theme_path[0]) {
+        load_theme(cfg_theme_path);
+    } else {
+        FILE *tf = fopen(THEME_AUTO_PATH, "r");
+        if (tf) { fclose(tf); load_theme(THEME_AUTO_PATH); }
     }
-    /* Calculate layout */
+
+    read_battery();
     calc_menu_layout();
-    selected = 0;
+    selected = (default_item_idx >= 0) ? default_item_idx : 0;
+
+    /* Countdown auto-boot state */
+    int cd_active = (cfg_timeout > 0 && default_item_idx >= 0);
+    int cd_ms = cfg_timeout * 1000;
+    int cd_left = cfg_timeout;
+    int last_shown = cd_left;
+    render_menu(cd_active ? cd_left : -1);
+
     /* Main menu loop */
     while (1) {
-        render_menu();
         int tx = -1, ty = -1;
-        int inp = wait_input(5000, &tx, &ty);
-        switch (inp) {
-            case INPUT_VOL_UP:
-                if (selected > 0) selected--;
-                else selected = entry_count - 1;
-                break;
-            case INPUT_VOL_DN:
-                if (selected < entry_count - 1) selected++;
-                else selected = 0;
-                break;
-            case INPUT_SELECT:
-                goto do_flash;
-            case INPUT_TOUCH: {
-                /* Map touch coordinates to menu item */
-                /* Touch may need rotation/scale correction */
-                int touch_idx = -1;
-                for (int i = 0; i < menu_visible_count && (menu_scroll + i) < entry_count; i++) {
-                    int y = menu_y + i * (menu_item_height + 12);
-                    if (ty >= y && ty <= y + menu_item_height &&
-                        tx >= menu_x && tx <= menu_x + menu_item_width) {
-                        touch_idx = menu_scroll + i;
-                        break;
-                    }
+        int inp = wait_input(cd_active ? 100 : 200, &tx, &ty);
+        if (inp == INPUT_NONE) {
+            if (cd_active) {
+                cd_ms -= 100;
+                int now = (cd_ms + 99) / 1000;
+                if (now < 0) now = 0;
+                if (now != last_shown) {
+                    cd_left = now;
+                    last_shown = now;
+                    render_menu(cd_left);
                 }
-                if (touch_idx >= 0) {
-                    selected = touch_idx;
+                if (cd_ms <= 0) {
+                    bm_log("[BootMenu] Countdown elapsed, booting default '%s'\n",
+                           entries[default_item_idx].name);
+                    selected = default_item_idx;
                     goto do_flash;
                 }
+            }
+            continue;
+        }
+        /* Any manual input cancels the countdown */
+        int was_active = cd_active;
+        cd_active = 0;
+        switch (inp) {
+            case INPUT_VOL_UP:
+                selected = (selected - 1 + entry_count) % entry_count;
+                render_menu(-1);
+                break;
+            case INPUT_VOL_DN:
+                selected = (selected + 1) % entry_count;
+                render_menu(-1);
+                break;
+            case INPUT_SELECT:
+                goto activate;
+            case INPUT_TOUCH: {
+                int touch_idx = item_at_xy(tx, ty);
+                if (touch_idx >= 0) {
+                    selected = touch_idx;
+                    goto activate;
+                }
+                if (was_active) render_menu(-1);
                 break;
             }
             case INPUT_BACK:
-                /* Back key = continue to recovery without flashing */
-                fb_close();
-                close_input_devices();
-                return 0;
+                /* Back no longer exits: use the 'Recovery' action card */
+                if (was_active) render_menu(-1);
+                break;
             default:
+                if (was_active) render_menu(-1);
                 break;
         }
     }
+
+activate:
+    if (entries[selected].type != ITEM_ROM) {
+        activate_entry(selected);   /* reboots / powers off, does not return */
+        hang_forever();
+    }
+
 do_flash:
     ;
     boot_entry_t *ent = &entries[selected];
@@ -1366,8 +1901,8 @@ do_flash:
         int waited = 0;
         while (waited < 8000) {
             int tx, ty;
-            int inp = wait_input(500, &tx, &ty);
-            if (inp == INPUT_SELECT || inp == INPUT_TOUCH) break;
+            int in = wait_input(500, &tx, &ty);
+            if (in == INPUT_SELECT || in == INPUT_TOUCH) break;
             waited += 500;
         }
         fb_close();
@@ -1382,8 +1917,8 @@ do_flash:
             int waited = 0;
             while (waited < 8000) {
                 int tx, ty;
-                int inp = wait_input(500, &tx, &ty);
-                if (inp == INPUT_SELECT || inp == INPUT_TOUCH) break;
+                int in = wait_input(500, &tx, &ty);
+                if (in == INPUT_SELECT || in == INPUT_TOUCH) break;
                 waited += 500;
             }
             fb_close();
@@ -1399,3 +1934,42 @@ do_flash:
     /* Should not reach here */
     return 0;
 }
+#else
+/* ================= HOST UI PREVIEW (not on device) ================= */
+static void write_ppm(const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror("ppm"); return; }
+    fprintf(f, "P6\n%d %d\n255\n", fb_width, fb_height);
+    for (int y = 0; y < fb_height; y++) {
+        unsigned char *row = fb_mem + y * fb_line_length;
+        for (int x = 0; x < fb_width; x++)
+            fwrite(&row[x*4], 1, 3, f); /* XBGR memory order = R,G,B */
+    }
+    fclose(f);
+}
+
+int main(int argc, char **argv) {
+    /* args: config.txt [theme.conf] out_menu.ppm out_countdown.ppm */
+    fb_width = 1080; fb_height = 2340; fb_bpp = 32;
+    fb_line_length = fb_width * 4; fb_size = fb_line_length * fb_height;
+    fb_mem = calloc(1, fb_size);
+    display_is_drm = 1; drm_fd = -1;
+    load_ext_font("/nonexistent/font.hex");
+    if (argc > 1) parse_config(argv[1]);
+    append_action_items();
+    resolve_default();
+    if (argc > 2 && argv[2][0]) load_theme(argv[2]);
+    battery_pct = 85; battery_charging = 0;
+    calc_menu_layout();
+    selected = default_item_idx >= 0 ? default_item_idx : 0;
+    render_menu(-1);
+    if (argc > 3) write_ppm(argv[3]);
+    /* countdown frame at 7s */
+    battery_pct = 23; battery_charging = 1;
+    render_menu(7);
+    if (argc > 4) write_ppm(argv[4]);
+    printf("HOST_PREVIEW ok: rom=%d total=%d default=%d timeout=%d bg=%d\n",
+           rom_count, entry_count, default_item_idx, cfg_timeout, bg_buf != NULL);
+    return 0;
+}
+#endif

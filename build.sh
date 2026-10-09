@@ -43,7 +43,7 @@ mkdir -p "$WORK" "$OUT"
 
 # 1. Compile the static aarch64 bootmenu binary
 echo "==> [1/5] Compiling bootmenu"
-"$CROSS" -static -O2 -s -o "$WORK/bootmenu" "$SRC/bootmenu.c"
+"$CROSS" -static -O2 -s -I "$SRC" -o "$WORK/bootmenu" "$SRC/bootmenu.c" "$SRC/stb_impl.c" -lm
 
 # 2. Unpack the base recovery image (kernel + ramdisk)
 echo "==> [2/5] Unpacking base image"

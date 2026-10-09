@@ -1,0 +1,22 @@
+# BootMenu v0.7 主题文件（GRUB 风格，key:value 或 key=value）
+# 用法: 在 file.txt 里写  theme=/setboot/theme.conf
+#       或直接放到 /data/setboot/theme.conf 自动加载
+# 颜色统一用 #RRGGBB 十六进制；背景图支持 PNG / JPG / BMP。
+
+# 桌面背景图（建议 1080x2340 竖屏；会自动居中裁剪铺满）
+desktop-image: "/setboot/bg.png"
+# background=/setboot/bg.jpg
+
+# 背景渐变（无背景图时生效；有背景图时作为兜底）
+bg-top:    "#1a1a2e"
+bg-bottom: "#16213e"
+
+# 文字与面板配色
+title-color:      "#ffd700"   # 大标题
+text-color:       "#eeeeee"   # 菜单项文字
+dim-color:        "#9aa4b2"   # 次要文字
+panel-color:      "#0f3460"   # 普通项底板
+border-color:     "#e94560"   # 普通项边框
+selected-bg:      "#e94560"   # 选中项底板
+selected-fg:      "#ffffff"   # 选中项文字
+accent-color:     "#22d3ee"   # 动作项/倒计时/分区标题强调色

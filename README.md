@@ -9,7 +9,18 @@ the **dtbo** partition, then reboots into recovery — which now boots the ROM y
 chose. The BootMenu itself stays untouched in the boot partition, so the menu
 keeps working and you can switch ROMs on every reboot.
 
-Title bar: `BootMenu v0.6  by半杯苏打`
+Title bar: `BootMenu v0.7  by半杯苏打`
+
+**v0.7 features**
+
+- **GRUB-style theming** — a background image (PNG/JPG/BMP) plus custom
+  `#RRGGBB` colors via a `theme.conf`.
+- **Recovery entry** — boot straight into OrangeFox/TWRP from the list.
+- **Power actions** — *Fastboot / Bootloader*, *EDL (9008)*, *Reboot*,
+  *Poweroff*.
+- **Countdown + default entry** — auto-boot a chosen ROM after N seconds;
+  set `timeout=0` to disable.
+- **Battery indicator** — live percentage (and charging state) in the header.
 
 > ⚠️ Flashing boot/recovery images can brick a device if used incorrectly.
 > Know how to recover with fastboot before using this. Tested only on
@@ -29,15 +40,17 @@ recovery service replaced by /sbin/bootmenu_wrapper.sh
    ▼
         ┌──────────── BootMenu UI ────────────┐
         │ read /data/setboot/file.txt (≤10)   │
+        │ ROMs + Recovery / power actions     │
         │ volume ± navigate / touch / power   │
+        │ optional countdown → default ROM    │
         └─────────────────────────────────────┘
    │                          │
- select a ROM              press Back
+ select a ROM            choose an action
    │                          │
    ▼                          ▼
-dd ROM boot.img ─►recovery   exec /system/bin/recovery
-dd ROM dtbo.img ─►dtbo       (normal OrangeFox recovery)
-misc = boot-recovery
+dd ROM boot.img ─►recovery   Recovery → reboot recovery
+dd ROM dtbo.img ─►dtbo       Fastboot/EDL → BCB + reboot
+misc = boot-recovery         Reboot / Poweroff → kernel reboot/poweroff
 reboot ─► recovery partition (now the chosen ROM) ─► ROM boots
 ```
 
@@ -51,14 +64,18 @@ BootMenu lives in **boot**; the selected ROM is launched through the
 | Volume + / -     | move selection up / down        |
 | Power key        | confirm selection               |
 | Touch an entry   | select that entry directly      |
-| Back key         | skip the menu, enter recovery   |
+| Any key / touch  | cancel a running countdown      |
 
-If `/data/setboot/file.txt` is missing or empty, or no display can be opened,
-the menu exits and the real OrangeFox recovery starts normally.
+The **Back key no longer leaves the menu**. To enter recovery, choose the
+**Recovery** entry in the *引导 / 电源* (boot / power) section. The menu always
+shows the power actions even if no ROM is configured; only when no display can
+be opened does it exit and start the real OrangeFox recovery.
 
 ## Configuration
 
-`/data/setboot/file.txt`, one entry per line, **up to 10 entries**:
+`/data/setboot/file.txt` contains ROM lines and optional settings.
+
+**ROM lines** — one per line, **up to 10**:
 
 ```
 # comments start with #
@@ -70,12 +87,22 @@ Display Name|/path/to/boot.img|/path/to/dtbo.img
 - Names are free text (Chinese and other Unicode supported via the built-in
   glyphs plus an optional external font).
 
+**Settings** — `key=value` (or `key: value`):
+
+| Key | Meaning |
+|-----|---------|
+| `timeout=10` | countdown seconds before auto-booting the default ROM; any input cancels it. **`0` disables the countdown** (default). |
+| `default=LineageOS 21` | default ROM by name, or by 1-based number (`default=2`). Falls back to the first ROM. Marked with a **默认** badge. |
+| `theme=/setboot/theme.conf` | GRUB-style theme file. If omitted, `/data/setboot/theme.conf` is tried automatically. |
+
 Example:
 
 ```
 MIUI 14 Stable|/setboot/miui14/boot.img|/setboot/miui14/dtbo.img
 LineageOS 21|/setboot/los21/boot.img|/setboot/los21/dtbo.img
 Evolution X|/setboot/evox/boot.img|/setboot/evox/dtbo.img
+timeout=10
+default=LineageOS 21
 ```
 
 Layout on `/data`:
@@ -83,19 +110,55 @@ Layout on `/data`:
 ```
 /data/setboot/
 ├── file.txt          # config
+├── theme.conf        # optional, GRUB-style theme (colors + background)
+├── bg.png            # optional, theme background (PNG/JPG/BMP)
 ├── font.hex          # optional, GNU Unifont .hex for extra glyphs
 ├── miui14/{boot.img,dtbo.img}
 └── los21/{boot.img,dtbo.img}
 ```
 
-A template is provided in [`assets/file.txt.example`](assets/file.txt.example).
+Templates: [`assets/file.txt.example`](assets/file.txt.example) and
+[`assets/theme.conf.example`](assets/theme.conf.example).
+
+### GRUB-style theme (`theme.conf`)
+
+A small, GRUB-inspired subset: `key: value` / `key=value`, `#` comments. Colors
+are `#RRGGBB`; the background is scaled (center-crop, cover) to the panel.
+
+```
+desktop-image: "/setboot/bg.png"
+title-color:  "#ffd700"
+text-color:   "#eeeeee"
+dim-color:    "#9aa4b2"
+panel-color:  "#0f3460"
+border-color: "#e94560"
+selected-bg:  "#e94560"
+selected-fg:  "#ffffff"
+accent-color: "#22d3ee"
+bg-top:       "#1a1a2e"   # fallback gradient when no image is set
+bg-bottom:    "#16213e"
+```
+
+Image decoding uses the public-domain **stb_image** single-header library
+(`src/stb_image.h`, implemented in `src/stb_impl.c`); no external image
+libraries are needed.
+
+### Power actions
+
+The *引导 / 电源* section always provides **Recovery**, **Fastboot /
+Bootloader**, **EDL 模式 (9008)**, **Reboot 重启**, and **Poweroff 关机**.
+Fastboot uses the BCB (`bootonce-bootloader`) plus the `bootloader` reboot
+reason; EDL tries the `edl`/`emergency`/`9008` reboot reasons and the Qualcomm
+`android_usb boot_mode` node, falling back to fastboot if the kernel/firmware
+does not support it. **EDL is high-risk** (9008 deep-flash mode).
 
 ### Unicode / Chinese font
 
-The binary has a built-in 8×16 ASCII font plus the 16×16 glyphs used in the
-title (**半杯苏打**). For arbitrary Unicode menu names, drop a GNU Unifont
-`.hex` file at `/data/setboot/font.hex`; both 8×16 and 16×16 glyphs are parsed.
-Get it from <https://unifoundry.com/unifont/>.
+The binary has a built-in 8×16 ASCII font plus the 16×16 glyphs used by the UI
+(**半杯苏打**, 引导/电源/重启/关机/默认/电量/充电中/模式 etc.). For arbitrary
+Unicode menu names, drop a GNU Unifont `.hex` file at
+`/data/setboot/font.hex`; both 8×16 and 16×16 glyphs are parsed. Get it from
+<https://unifoundry.com/unifont/>.
 
 ## Build
 
@@ -121,17 +184,19 @@ The individual stages live in [`src/`](src/):
 
 | Script | Purpose |
 |--------|---------|
-| `src/bootmenu.c` | the menu program (DRM/KMS graphics, evdev input, flashing) |
+| `src/bootmenu.c` | the menu program (DRM/KMS graphics, evdev input, theming, flashing, reboot) |
+| `src/stb_image.h` / `src/stb_impl.c` | public-domain PNG/JPG/BMP decoder (theme background) |
 | `src/bootmenu_wrapper.sh` | recovery-service wrapper: mount /data, run menu, exec recovery |
 | `src/unpack_bootimg.py` | split a boot v0 image into kernel + ramdisk |
 | `src/inject.py` | install binary/wrapper and patch `init.recovery.service.rc` |
 | `src/repack_cpio.py` | rebuild the ramdisk as cpio newc + gzip |
 | `src/pack_bootimg.py` | rebuild the Android boot v0 image |
 
-Compile the binary on its own with:
+Compile the binary on its own with (note the second translation unit):
 
 ```bash
-aarch64-linux-gnu-gcc -static -O2 -s -o bootmenu src/bootmenu.c
+aarch64-linux-gnu-gcc -static -O2 -s -I src -o bootmenu \
+    src/bootmenu.c src/stb_impl.c -lm
 ```
 
 ## Install
@@ -181,11 +246,14 @@ Input devices observed: `qpnp_pon` (power), `gpio-keys` (volume),
 .
 ├── build.sh                  # one-click build
 ├── assets/
-│   └── file.txt.example      # config template
+│   ├── file.txt.example      # config template
+│   └── theme.conf.example    # GRUB-style theme template
 ├── scripts/
 │   └── flash_bootmenu.sh     # recovery-side installer
 └── src/
     ├── bootmenu.c            # menu program
+    ├── stb_image.h           # PNG/JPG/BMP decoder (header-only)
+    ├── stb_impl.c            # stb_image implementation unit
     ├── bootmenu_wrapper.sh   # recovery-service wrapper
     ├── unpack_bootimg.py
     ├── inject.py
