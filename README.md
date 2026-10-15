@@ -9,9 +9,17 @@ the **dtbo** partition, then reboots into recovery — which now boots the ROM y
 chose. The BootMenu itself stays untouched in the boot partition, so the menu
 keeps working and you can switch ROMs on every reboot.
 
-Title bar: `BootMenu v0.7  by半杯苏打`
+Title bar: `BootMenu v0.8  by半杯苏打`
 
-**v0.7 features**
+**v0.8 changes**
+
+- **Back key exits the menu** into OrangeFox/TWRP recovery (the wrapper then
+  execs the real recovery).
+- **Unlimited ROM entries** — the 10-entry cap is gone; long lists scroll
+  automatically with `^ more` / `v more` indicators.
+- Version bumped to v0.8; the title/署名 is unchanged.
+
+**v0.7 features (still present)**
 
 - **GRUB-style theming** — a background image (PNG/JPG/BMP) plus custom
   `#RRGGBB` colors via a `theme.conf`.
@@ -39,10 +47,11 @@ recovery service replaced by /sbin/bootmenu_wrapper.sh
    │  mounts /data, runs /sbin/bootmenu
    ▼
         ┌──────────── BootMenu UI ────────────┐
-        │ read /data/setboot/file.txt (≤10)   │
+        │ read /data/setboot/file.txt (unlim) │
         │ ROMs + Recovery / power actions     │
         │ volume ± navigate / touch / power   │
         │ optional countdown → default ROM    │
+        │ Back → exit to OrangeFox recovery   │
         └─────────────────────────────────────┘
    │                          │
  select a ROM            choose an action
@@ -61,21 +70,23 @@ BootMenu lives in **boot**; the selected ROM is launched through the
 
 | Input            | Action                          |
 |------------------|---------------------------------|
-| Volume + / -     | move selection up / down        |
+| Volume + / -     | move selection up / down (scrolls when the list is long) |
 | Power key        | confirm selection               |
 | Touch an entry   | select that entry directly      |
 | Any key / touch  | cancel a running countdown      |
+| Back key         | **exit the menu into OrangeFox/TWRP recovery** |
 
-The **Back key no longer leaves the menu**. To enter recovery, choose the
-**Recovery** entry in the *引导 / 电源* (boot / power) section. The menu always
-shows the power actions even if no ROM is configured; only when no display can
-be opened does it exit and start the real OrangeFox recovery.
+The **Back key exits** the menu: the wrapper then execs the real
+OrangeFox recovery. You can also enter recovery via the **Recovery** entry in
+the *引导 / 电源* (boot / power) section. The menu always shows the power
+actions even if no ROM is configured; only when no display can be opened does
+it exit and start the real OrangeFox recovery.
 
 ## Configuration
 
 `/data/setboot/file.txt` contains ROM lines and optional settings.
 
-**ROM lines** — one per line, **up to 10**:
+**ROM lines** — one per line, **no limit** (long lists scroll automatically):
 
 ```
 # comments start with #

@@ -1,10 +1,11 @@
-# BootMenu v0.7 配置文件
+# BootMenu v0.8 配置文件
 # 位置: /data/setboot/file.txt
 #
 # ===== 一、系统启动项 =====
 # 格式: 启动名称|boot.img路径|dtbo.img路径
 # 路径相对于 /data（即 /setboot/xxx 等价于 /data/setboot/xxx）
-# 以 # 或 ; 开头的行为注释，最多 10 个系统。
+# 以 # 或 ; 开头的行为注释。
+# 系统数量没有上限（一屏显示不下会自动滚动，音量键翻动）。
 # 选中后: boot.img 刷入 recovery 分区, dtbo.img 刷入 dtbo 分区, 再重启进入该系统。
 # BootMenu 常驻 boot 分区，切换系统不会覆盖它。
 MIUI 14 Stable|/setboot/miui14/boot.img|/setboot/miui14/dtbo.img
@@ -29,9 +30,13 @@ default=LineageOS 21
 #   EDL 模式 (9008)        重启到高通紧急下载 EDL（有变砖/需深刷风险）
 #   Reboot 重启            普通重启
 #   Poweroff 关机          关机
-# 返回键不再退出菜单；要进 Recovery 请选择 Recovery 动作项。
 #
-# ===== 四、目录结构 =====
+# ===== 四、按键操作 =====
+#   音量+ / 音量- : 上下移动（列表过长时滚动）
+#   电源键 / 触摸 : 确认选择
+#   返回键        : 退出菜单，进入橙狐 OrangeFox Recovery
+#
+# ===== 五、目录结构 =====
 # /data/setboot/
 #   file.txt        本配置
 #   font.hex        可选: Unifont .hex 字体（补充更多非 ASCII 字形）
@@ -39,5 +44,3 @@ default=LineageOS 21
 #   bg.png          可选: 主题背景图（PNG/JPG/BMP）
 #   miui14/boot.img  miui14/dtbo.img
 #   los21/boot.img   los21/dtbo.img
-#
-# 操作: 音量+/- 上下移动，电源键/触摸 确认。

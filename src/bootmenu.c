@@ -72,9 +72,7 @@ static void set_selinux_permissive(void) {
 }
 
 /* ============ Constants ============ */
-#define MAX_ROM         10
 #define MAX_ACTIONS     5
-#define MAX_ENTRIES     (MAX_ROM + MAX_ACTIONS)
 #define MAX_NAME_LEN    128
 #define MAX_PATH_LEN    256
 #define CONFIG_PATH     "/data/setboot/file.txt"
@@ -83,7 +81,7 @@ static void set_selinux_permissive(void) {
 #define RECOVERY_DEV    "/dev/block/bootdevice/by-name/recovery"
 #define DTBO_DEV        "/dev/block/bootdevice/by-name/dtbo"
 #define MISC_DEV        "/dev/block/bootdevice/by-name/misc"
-#define BOOTMENU_VERSION "0.7"
+#define BOOTMENU_VERSION "0.8"
 
 /* Menu item types */
 enum { ITEM_ROM = 0, ITEM_RECOVERY, ITEM_FASTBOOT, ITEM_EDL, ITEM_REBOOT, ITEM_POWEROFF };
@@ -509,9 +507,21 @@ typedef struct {
     int  valid;
 } boot_entry_t;
 
-static boot_entry_t entries[MAX_ENTRIES];
+static boot_entry_t *entries = NULL;   /* dynamic: unlimited number of systems */
+static int entry_cap = 0;
 static int entry_count = 0;
 static int selected = 0;
+
+/* Ensure entries[] has room for at least 'need' items (grows by doubling) */
+static void ensure_entry_cap(int need) {
+    if (need <= entry_cap) return;
+    int nc = entry_cap ? entry_cap : 16;
+    while (nc < need) nc *= 2;
+    boot_entry_t *np = realloc(entries, (size_t)nc * sizeof(boot_entry_t));
+    if (!np) return;
+    entries = np;
+    entry_cap = nc;
+}
 
 /* ============ Font (8x16 ASCII built-in) ============ */
 /* Standard VGA 8x16 bitmap font for ASCII 0-127 */
@@ -1209,7 +1219,7 @@ static int parse_config(const char *path) {
     char line[512];
     entry_count = 0;
     rom_count = 0;
-    while (fgets(line, sizeof(line), f) && rom_count < MAX_ROM) {
+    while (fgets(line, sizeof(line), f)) {
         /* Remove trailing newline */
         int len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
@@ -1228,6 +1238,7 @@ static int parse_config(const char *path) {
             char *dtbo_img = "";
             if (pipe2) { *pipe2 = '\0'; dtbo_img = pipe2 + 1; }
             name = bm_trim(name); boot_img = bm_trim(boot_img); dtbo_img = bm_trim(dtbo_img);
+            ensure_entry_cap(entry_count + 1);
             boot_entry_t *e = &entries[entry_count];
             memset(e, 0, sizeof(*e));
             strncpy(e->name, name, MAX_NAME_LEN - 1);
@@ -1273,7 +1284,7 @@ static int parse_config(const char *path) {
 }
 
 static void add_action_item(int type, const char *name) {
-    if (entry_count >= MAX_ENTRIES) return;
+    ensure_entry_cap(entry_count + 1);
     boot_entry_t *e = &entries[entry_count];
     memset(e, 0, sizeof(*e));
     strncpy(e->name, name, MAX_NAME_LEN - 1);
@@ -1598,11 +1609,14 @@ static void activate_entry(int idx) {
 static void do_reboot(void) { reboot_recovery(); }
 
 /* ============ Menu rendering ============ */
-/* Menu item geometry */
-#define MAX_ROWS (MAX_ENTRIES + 2)
+/* Menu item geometry (dynamic: unlimited entries, scrollable list) */
 typedef struct { int header; int item; int y; int h; } row_t;
-static row_t menu_rows[MAX_ROWS];
+static row_t *menu_rows = NULL;
+static int menu_rows_cap = 0;
 static int menu_row_count = 0;
+static int menu_max_visible = 1;   /* max item rows that fit on one screen */
+static int menu_total_rows = 1;    /* total global rows incl. section header */
+static int scroll_top = 0;         /* first visible global row index */
 static int menu_item_height = 64;
 static int menu_item_width = 0;
 static int menu_x = 0;
@@ -1610,41 +1624,106 @@ static int menu_y = 0;
 static int menu_gap = 12;
 static int menu_header_h = 44;
 
-static void calc_menu_layout(void) {
-    menu_item_width = fb_width * 3 / 4;
-    if (menu_item_width > 820) menu_item_width = 820;
-    menu_x = (fb_width - menu_item_width) / 2;
-    int top_reserve = 190, bottom_reserve = 140;
-    int avail = fb_height - top_reserve - bottom_reserve;
-    int n = entry_count > 0 ? entry_count : 1;
-    /* Fit all item rows + one section header */
-    int h = (avail - menu_header_h - n * menu_gap) / n;
-    if (h > 112) h = 112;
-    if (h < 52) h = 52;
-    menu_item_height = h;
-    /* Vertically center the whole row block */
-    int total_h = menu_header_h + n * (h + menu_gap);
-    int start_y = top_reserve + (avail - total_h) / 2;
-    if (start_y < top_reserve) start_y = top_reserve;
-    menu_y = start_y;
-    /* Build row descriptors (insert a header before the action section) */
+static void ensure_rows_cap(int need) {
+    if (need <= menu_rows_cap) return;
+    int nc = menu_rows_cap ? menu_rows_cap : 24;
+    while (nc < need) nc *= 2;
+    row_t *np = realloc(menu_rows, (size_t)nc * sizeof(row_t));
+    if (!np) return;
+    menu_rows = np;
+    menu_rows_cap = nc;
+}
+
+/* Global row index of an entry (the section header occupies the slot at rom_count) */
+static int row_of(int item) {
+    if (rom_count > 0 && rom_count < entry_count && item >= rom_count) return item + 1;
+    return item;
+}
+
+/* Map a global row index to an item index, or -1 for the section header */
+static int item_of_row(int r) {
+    if (rom_count > 0 && rom_count < entry_count) {
+        if (r == rom_count) return -1;
+        if (r > rom_count) return r - 1;
+    }
+    return r;
+}
+
+/* Build the row descriptors for the visible window starting at scroll_top */
+static void build_visible_rows(int start_y) {
+    int scrolling = (menu_total_rows > menu_max_visible);
+    int visible = scrolling ? menu_max_visible : menu_total_rows;
+    ensure_rows_cap(menu_max_visible + 2);
     menu_row_count = 0;
     int y = start_y;
-    for (int i = 0; i < entry_count; i++) {
-        if (i == rom_count) {
+    for (int i = 0; i < visible; i++) {
+        int gr = scroll_top + i;
+        if (gr >= menu_total_rows) break;
+        int item = item_of_row(gr);
+        if (item < 0) {
             menu_rows[menu_row_count].header = 1;
             menu_rows[menu_row_count].item = -1;
             menu_rows[menu_row_count].y = y;
             menu_rows[menu_row_count].h = menu_header_h;
             menu_row_count++;
             y += menu_header_h;
+            continue;
         }
         menu_rows[menu_row_count].header = 0;
-        menu_rows[menu_row_count].item = i;
+        menu_rows[menu_row_count].item = item;
         menu_rows[menu_row_count].y = y;
         menu_rows[menu_row_count].h = menu_item_height;
         menu_row_count++;
         y += menu_item_height + menu_gap;
+    }
+}
+
+/* Keep the selection visible, then keep scroll_top in range */
+static void clamp_scroll(void) {
+    if (entry_count <= 0) { scroll_top = 0; return; }
+    int max_vis = menu_max_visible;
+    int srow = row_of(selected);
+    if (menu_total_rows <= max_vis) { scroll_top = 0; return; }
+    if (srow < scroll_top) scroll_top = srow;
+    else if (srow >= scroll_top + max_vis) scroll_top = srow - max_vis + 1;
+    if (scroll_top < 0) scroll_top = 0;
+    if (scroll_top + max_vis > menu_total_rows)
+        scroll_top = menu_total_rows - max_vis;
+    if (scroll_top < 0) scroll_top = 0;
+    build_visible_rows(menu_y);
+}
+
+static void calc_menu_layout(void) {
+    menu_item_width = fb_width * 3 / 4;
+    if (menu_item_width > 820) menu_item_width = 820;
+    menu_x = (fb_width - menu_item_width) / 2;
+    int top_reserve = 190, bottom_reserve = 140;
+    int avail = fb_height - top_reserve - bottom_reserve;
+    menu_total_rows = entry_count + ((rom_count > 0 && rom_count < entry_count) ? 1 : 0);
+    int n = entry_count > 0 ? entry_count : 1;
+    /* Row height: fit all if possible, clamped to a readable range */
+    int h = (avail - menu_header_h - n * menu_gap) / n;
+    if (h > 112) h = 112;
+    if (h < 56) h = 56;
+    menu_item_height = h;
+    menu_max_visible = (avail - menu_header_h) / (h + menu_gap);
+    if (menu_max_visible < 1) menu_max_visible = 1;
+    /* Determine layout mode */
+    int scrolling = (menu_total_rows > menu_max_visible);
+    int start_y;
+    if (scrolling) {
+        /* Scroll mode: fixed row height, list starts at the top reserve */
+        start_y = top_reserve;
+        menu_y = start_y;
+        clamp_scroll();
+    } else {
+        scroll_top = 0;
+        /* Fit mode: vertically center the whole block */
+        int total_h = menu_header_h + n * (h + menu_gap);
+        start_y = top_reserve + (avail - total_h) / 2;
+        if (start_y < top_reserve) start_y = top_reserve;
+        menu_y = start_y;
+        build_visible_rows(start_y);
     }
 }
 
@@ -1737,10 +1816,21 @@ static void render_menu(int cd_remaining) {
         }
     }
 
+    /* Scroll indicators when the list is longer than the screen */
+    if (menu_total_rows > menu_max_visible) {
+        if (scroll_top > 0)
+            draw_text_centered(fb_width / 2, menu_y - 22, "^ more", T_accent);
+        int last_y = menu_y;
+        for (int r = 0; r < menu_row_count; r++)
+            if (menu_rows[r].y + menu_rows[r].h > last_y) last_y = menu_rows[r].y + menu_rows[r].h;
+        if (scroll_top + menu_row_count < menu_total_rows)
+            draw_text_centered(fb_width / 2, last_y + 6, "v more", T_accent);
+    }
+
     /* Footer instructions */
     int footer_y = fb_height - 92;
     draw_text_centered(fb_width / 2, footer_y,
-                       "Vol+/- Navigate      Power / Touch Select", T_dim);
+                       "Vol+/- Navigate      Power / Touch Select      Back = Recovery", T_dim);
     draw_text_centered(fb_width / 2, footer_y + 24,
                        "Recovery / Fastboot / EDL / Reboot / Poweroff in the list", T_dim);
     draw_text_centered(fb_width / 2, footer_y + 46,
@@ -1818,6 +1908,7 @@ int main(int argc, char **argv) {
     read_battery();
     calc_menu_layout();
     selected = (default_item_idx >= 0) ? default_item_idx : 0;
+    clamp_scroll();
 
     /* Countdown auto-boot state */
     int cd_active = (cfg_timeout > 0 && default_item_idx >= 0);
@@ -1855,10 +1946,12 @@ int main(int argc, char **argv) {
         switch (inp) {
             case INPUT_VOL_UP:
                 selected = (selected - 1 + entry_count) % entry_count;
+                clamp_scroll();
                 render_menu(-1);
                 break;
             case INPUT_VOL_DN:
                 selected = (selected + 1) % entry_count;
+                clamp_scroll();
                 render_menu(-1);
                 break;
             case INPUT_SELECT:
@@ -1873,9 +1966,11 @@ int main(int argc, char **argv) {
                 break;
             }
             case INPUT_BACK:
-                /* Back no longer exits: use the 'Recovery' action card */
-                if (was_active) render_menu(-1);
-                break;
+                /* Exit the menu: the wrapper then execs OrangeFox recovery */
+                bm_log("[BootMenu] Back pressed, exiting to OrangeFox recovery\n");
+                fb_close();
+                close_input_devices();
+                return 0;
             default:
                 if (was_active) render_menu(-1);
                 break;
@@ -1949,7 +2044,7 @@ static void write_ppm(const char *path) {
 }
 
 int main(int argc, char **argv) {
-    /* args: config.txt [theme.conf] out_menu.ppm out_countdown.ppm */
+    /* args: config.txt [theme.conf] [selected_idx] out_menu.ppm out_countdown.ppm */
     fb_width = 1080; fb_height = 2340; fb_bpp = 32;
     fb_line_length = fb_width * 4; fb_size = fb_line_length * fb_height;
     fb_mem = calloc(1, fb_size);
@@ -1961,15 +2056,21 @@ int main(int argc, char **argv) {
     if (argc > 2 && argv[2][0]) load_theme(argv[2]);
     battery_pct = 85; battery_charging = 0;
     calc_menu_layout();
-    selected = default_item_idx >= 0 ? default_item_idx : 0;
+    selected = 0;
+    if (argc > 3 && argv[3][0]) {
+        int s = atoi(argv[3]);
+        if (s >= 0 && s < entry_count) selected = s;
+    }
+    clamp_scroll();
     render_menu(-1);
-    if (argc > 3) write_ppm(argv[3]);
+    if (argc > 4) write_ppm(argv[4]);
     /* countdown frame at 7s */
     battery_pct = 23; battery_charging = 1;
     render_menu(7);
-    if (argc > 4) write_ppm(argv[4]);
-    printf("HOST_PREVIEW ok: rom=%d total=%d default=%d timeout=%d bg=%d\n",
-           rom_count, entry_count, default_item_idx, cfg_timeout, bg_buf != NULL);
+    if (argc > 5) write_ppm(argv[5]);
+    printf("HOST_PREVIEW ok: rom=%d total=%d default=%d timeout=%d bg=%d scroll_top=%d max_vis=%d\n",
+           rom_count, entry_count, default_item_idx, cfg_timeout, bg_buf != NULL,
+           scroll_top, menu_max_visible);
     return 0;
 }
 #endif
