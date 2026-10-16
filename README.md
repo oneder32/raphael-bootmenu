@@ -13,17 +13,18 @@ Title bar: `BootMenu v0.8  by半杯苏打`
 
 **v0.8 changes**
 
-- **Back key exits the menu** into OrangeFox/TWRP recovery (the wrapper then
-  execs the real recovery).
+- **The *Recovery* entry exits the menu** into OrangeFox/TWRP recovery: the
+  wrapper then execs the real recovery — no reboot involved.
 - **Unlimited ROM entries** — the 10-entry cap is gone; long lists scroll
   automatically with `^ more` / `v more` indicators.
-- Version bumped to v0.8; the title/署名 is unchanged.
+- Version bumped to v0.8; the title/署名 is unchanged. (The Back key does not
+  exit the menu; to reach recovery, choose the *Recovery* entry.)
 
 **v0.7 features (still present)**
 
 - **GRUB-style theming** — a background image (PNG/JPG/BMP) plus custom
   `#RRGGBB` colors via a `theme.conf`.
-- **Recovery entry** — boot straight into OrangeFox/TWRP from the list.
+- **Recovery entry** — exits the menu into OrangeFox/TWRP recovery.
 - **Power actions** — *Fastboot / Bootloader*, *EDL (9008)*, *Reboot*,
   *Poweroff*.
 - **Countdown + default entry** — auto-boot a chosen ROM after N seconds;
@@ -74,13 +75,12 @@ BootMenu lives in **boot**; the selected ROM is launched through the
 | Power key        | confirm selection               |
 | Touch an entry   | select that entry directly      |
 | Any key / touch  | cancel a running countdown      |
-| Back key         | **exit the menu into OrangeFox/TWRP recovery** |
+| Back key         | does **not** exit; cancels countdown only |
 
-The **Back key exits** the menu: the wrapper then execs the real
-OrangeFox recovery. You can also enter recovery via the **Recovery** entry in
-the *引导 / 电源* (boot / power) section. The menu always shows the power
-actions even if no ROM is configured; only when no display can be opened does
-it exit and start the real OrangeFox recovery.
+The **Recovery entry** (in the *引导 / 电源* section) **exits the menu**: the
+wrapper then execs the real OrangeFox recovery — no reboot. The menu always
+shows the power actions even if no ROM is configured; only when no display can
+be opened does it exit and start the real OrangeFox recovery.
 
 ## Configuration
 

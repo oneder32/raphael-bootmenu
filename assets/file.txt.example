@@ -25,7 +25,7 @@ default=LineageOS 21
 # theme=/setboot/theme.conf
 #
 # ===== 三、内置动作项（无需配置，自动出现在“引导 / 电源”分区）=====
-#   Recovery              进入 Recovery（不刷写）
+#   Recovery              退出菜单，直接进入橙狐 OrangeFox Recovery（不重启）
 #   Fastboot / Bootloader 重启到 fastboot
 #   EDL 模式 (9008)        重启到高通紧急下载 EDL（有变砖/需深刷风险）
 #   Reboot 重启            普通重启
@@ -34,7 +34,7 @@ default=LineageOS 21
 # ===== 四、按键操作 =====
 #   音量+ / 音量- : 上下移动（列表过长时滚动）
 #   电源键 / 触摸 : 确认选择
-#   返回键        : 退出菜单，进入橙狐 OrangeFox Recovery
+#   返回键        : 不退出菜单（要进 Recovery 请选择上面的 Recovery 动作项）
 #
 # ===== 五、目录结构 =====
 # /data/setboot/

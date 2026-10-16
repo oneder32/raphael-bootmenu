@@ -1580,6 +1580,8 @@ static void activate_entry(int idx) {
     bm_log("[BootMenu] Activate idx=%d type=%d name='%s'\n", idx, ent->type, ent->name);
     switch (ent->type) {
         case ITEM_RECOVERY:
+            /* Not reached from main: ITEM_RECOVERY exits the menu (see activate:).
+             * Kept here only as a defensive fallback. */
             fb_close(); close_input_devices();
             reboot_recovery();
             break;
@@ -1830,7 +1832,7 @@ static void render_menu(int cd_remaining) {
     /* Footer instructions */
     int footer_y = fb_height - 92;
     draw_text_centered(fb_width / 2, footer_y,
-                       "Vol+/- Navigate      Power / Touch Select      Back = Recovery", T_dim);
+                       "Vol+/- Navigate      Power / Touch Select", T_dim);
     draw_text_centered(fb_width / 2, footer_y + 24,
                        "Recovery / Fastboot / EDL / Reboot / Poweroff in the list", T_dim);
     draw_text_centered(fb_width / 2, footer_y + 46,
@@ -1966,11 +1968,9 @@ int main(int argc, char **argv) {
                 break;
             }
             case INPUT_BACK:
-                /* Exit the menu: the wrapper then execs OrangeFox recovery */
-                bm_log("[BootMenu] Back pressed, exiting to OrangeFox recovery\n");
-                fb_close();
-                close_input_devices();
-                return 0;
+                /* Back does not exit the menu; use the 'Recovery' entry instead */
+                if (was_active) render_menu(-1);
+                break;
             default:
                 if (was_active) render_menu(-1);
                 break;
@@ -1978,6 +1978,13 @@ int main(int argc, char **argv) {
     }
 
 activate:
+    if (entries[selected].type == ITEM_RECOVERY) {
+        /* Exit the menu: the wrapper then execs the real OrangeFox recovery */
+        bm_log("[BootMenu] Recovery selected, exiting to OrangeFox recovery\n");
+        fb_close();
+        close_input_devices();
+        return 0;
+    }
     if (entries[selected].type != ITEM_ROM) {
         activate_entry(selected);   /* reboots / powers off, does not return */
         hang_forever();
