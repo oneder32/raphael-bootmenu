@@ -17,8 +17,8 @@ Title bar: `BootMenu v0.8  by半杯苏打`
   wrapper then execs the real recovery — no reboot involved.
 - **Unlimited ROM entries** — the 10-entry cap is gone; long lists scroll
   automatically with `^ more` / `v more` indicators.
-- Version bumped to v0.8; the title/署名 is unchanged. (The Back key does not
-  exit the menu; to reach recovery, choose the *Recovery* entry.)
+- Version bumped to v0.8; the title/署名 is unchanged. (The Back key is
+  disabled; volume keys cancel the countdown and move the selection.)
 
 **v0.7 features (still present)**
 
@@ -71,11 +71,11 @@ BootMenu lives in **boot**; the selected ROM is launched through the
 
 | Input            | Action                          |
 |------------------|---------------------------------|
-| Volume + / -     | move selection up / down (scrolls when the list is long) |
+| Volume + / -     | cancel the countdown and move selection up / down (scrolls when the list is long) |
 | Power key        | confirm selection               |
 | Touch an entry   | select that entry directly      |
 | Any key / touch  | cancel a running countdown      |
-| Back key         | does **not** exit; cancels countdown only |
+| Back key         | disabled (no action)            |
 
 The **Recovery entry** (in the *引导 / 电源* section) **exits the menu**: the
 wrapper then execs the real OrangeFox recovery — no reboot. The menu always

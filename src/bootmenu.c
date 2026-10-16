@@ -1363,7 +1363,6 @@ static void close_input_devices(void) {
 #define INPUT_VOL_DN  2
 #define INPUT_SELECT  3
 #define INPUT_TOUCH   4
-#define INPUT_BACK    5
 
 static int wait_input(int timeout_ms, int *out_touch_x, int *out_touch_y) {
     fd_set rfds;
@@ -1389,7 +1388,7 @@ static int wait_input(int timeout_ms, int *out_touch_x, int *out_touch_y) {
                         case KEY_VOLUMEDOWN: return INPUT_VOL_DN;
                         case KEY_POWER: return INPUT_SELECT;
                         case KEY_HOME: return INPUT_SELECT;
-                        case KEY_BACK: return INPUT_BACK;
+                        /* KEY_BACK intentionally disabled: no back-key action */
                         case KEY_ENTER: return INPUT_SELECT;
                         case KEY_MENU: return INPUT_SELECT;
                     }
@@ -1967,10 +1966,6 @@ int main(int argc, char **argv) {
                 if (was_active) render_menu(-1);
                 break;
             }
-            case INPUT_BACK:
-                /* Back does not exit the menu; use the 'Recovery' entry instead */
-                if (was_active) render_menu(-1);
-                break;
             default:
                 if (was_active) render_menu(-1);
                 break;
